@@ -1,0 +1,48 @@
+name: Sync Playbook Catalog
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'playbooks/**'
+
+permissions:
+  contents: read
+  id-token: write
+
+env:
+  GCP_PROJECT_ID: skillmatic-ea1ab
+  GCP_PROJECT_NUMBER: '445950635493'
+  GAR_REGION: us-central1
+  GAR_REPOSITORY: skillmatic-agents
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: pip install pyyaml firebase-admin
+
+      - name: Authenticate to Google Cloud
+        id: auth
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: 'projects/${{ env.GCP_PROJECT_NUMBER }}/locations/global/workloadIdentityPools/github-pool/providers/github-provider'
+          service_account: 'github-ci@${{ env.GCP_PROJECT_ID }}.iam.gserviceaccount.com'
+
+      - name: Sync catalog to Firestore
+        run: |
+          python scripts/sync-catalog.py \
+            --playbooks-dir playbooks \
+            --project-id ${{ env.GCP_PROJECT_ID }} \
+            --repo-url "https://github.com/${{ github.repository }}" \
+            --skip-image-validation

@@ -1,0 +1,88 @@
+name: Build Step Agent
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'step-agents/**'
+
+permissions:
+  contents: read
+  id-token: write
+
+env:
+  GCP_PROJECT_ID: skillmatic-ea1ab
+  GCP_PROJECT_NUMBER: '445950635493'
+  GAR_REGION: us-central1
+  GAR_REPOSITORY: skillmatic-agents
+
+jobs:
+  detect-changes:
+    runs-on: ubuntu-latest
+    outputs:
+      agents: ${{ steps.detect.outputs.agents }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+
+      - name: Detect changed step agents
+        id: detect
+        run: |
+          # Handle first commit (no HEAD~1)
+          if git rev-parse HEAD~1 >/dev/null 2>&1; then
+            CHANGED=$(git diff --name-only HEAD~1 HEAD -- step-agents/ \
+              | cut -d'/' -f2 \
+              | sort -u \
+              | jq -R -s -c 'split("\n") | map(select(length > 0))')
+          else
+            # First commit — build all step agents
+            CHANGED=$(ls -d step-agents/*/ 2>/dev/null \
+              | xargs -I{} basename {} \
+              | jq -R -s -c 'split("\n") | map(select(length > 0))')
+          fi
+          echo "agents=$CHANGED" >> "$GITHUB_OUTPUT"
+          echo "Changed agents: $CHANGED"
+
+  build-and-push:
+    needs: detect-changes
+    if: needs.detect-changes.outputs.agents != '[]' && needs.detect-changes.outputs.agents != ''
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        agent: ${{ fromJson(needs.detect-changes.outputs.agents) }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Validate SKILL.md exists
+        run: |
+          SKILL_COUNT=$(find "step-agents/${{ matrix.agent }}/skills" -name "SKILL.md" 2>/dev/null | wc -l)
+          if [ "$SKILL_COUNT" -eq 0 ]; then
+            echo "::error::No SKILL.md found in step-agents/${{ matrix.agent }}/skills/*/"
+            exit 1
+          fi
+
+      - name: Authenticate to Google Cloud
+        id: auth
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: 'projects/${{ env.GCP_PROJECT_NUMBER }}/locations/global/workloadIdentityPools/github-pool/providers/github-provider'
+          service_account: 'github-ci@${{ env.GCP_PROJECT_ID }}.iam.gserviceaccount.com'
+
+      - name: Configure Docker for Artifact Registry
+        run: gcloud auth configure-docker ${{ env.GAR_REGION }}-docker.pkg.dev --quiet
+
+      - name: Build Docker image
+        run: |
+          docker build \
+            -t ${{ env.GAR_REGION }}-docker.pkg.dev/${{ env.GCP_PROJECT_ID }}/${{ env.GAR_REPOSITORY }}/step-${{ matrix.agent }}:${{ github.sha }} \
+            -t ${{ env.GAR_REGION }}-docker.pkg.dev/${{ env.GCP_PROJECT_ID }}/${{ env.GAR_REPOSITORY }}/step-${{ matrix.agent }}:latest \
+            ./step-agents/${{ matrix.agent }}
+
+      - name: Push Docker image
+        run: |
+          docker push ${{ env.GAR_REGION }}-docker.pkg.dev/${{ env.GCP_PROJECT_ID }}/${{ env.GAR_REPOSITORY }}/step-${{ matrix.agent }}:${{ github.sha }}
+          docker push ${{ env.GAR_REGION }}-docker.pkg.dev/${{ env.GCP_PROJECT_ID }}/${{ env.GAR_REPOSITORY }}/step-${{ matrix.agent }}:latest
