@@ -110,11 +110,15 @@ def read_input(
     run_id: str,
     question_id: str,
 ) -> dict | None:
-    """Read a single input document by questionId (direct read, no polling).
+    """Read a single input document by questionId or approvalId.
 
     Called on resume — the input document should already exist because the
     Firebase Function onInputReceived only creates a resume Job after the
     user submits their response.
+
+    The app writes questionId for question answers and approvalId for
+    approval decisions.  The checkpoint always stores the ID under the
+    ``questionId`` key, so we search both Firestore fields.
 
     Returns the input document dict, or None if not found.
     """
@@ -123,12 +127,16 @@ def read_input(
         .collection("playbook_runs").document(run_id) \
         .collection("inputs")
 
-    query = inputs_ref \
-        .where("questionId", "==", question_id) \
-        .limit(1)
-    docs = list(query.stream())
+    # Try questionId first (question answers)
+    docs = list(inputs_ref.where("questionId", "==", question_id).limit(1).stream())
     if docs:
         return docs[0].to_dict()
+
+    # Fall back to approvalId (approval decisions)
+    docs = list(inputs_ref.where("approvalId", "==", question_id).limit(1).stream())
+    if docs:
+        return docs[0].to_dict()
+
     return None
 
 

@@ -1,7 +1,10 @@
-"""K8s Client — helpers for creating step agent Jobs and PVCs.
+"""K8s Client — helpers for creating step agent Jobs.
 
 Uses in-cluster config when running inside GKE (ServiceAccount token auto-mounted).
 The playbook agent creates step agent Jobs in the same namespace.
+
+Storage strategy: No PVC — each pod uses emptyDir for local scratch.
+Inter-step data flows through Firestore (the source of truth).
 
 No project-specific values are hardcoded — the image registry comes from the
 AGENT_IMAGE_REGISTRY env var, set by the Firebase Function that launched us.
@@ -37,6 +40,11 @@ def _namespace() -> str:
     return os.environ.get("NAMESPACE", "skillmatic")
 
 
+def _k8s_name(name: str) -> str:
+    """Sanitise a Firestore doc ID for K8s resource names (RFC 1123 lowercase)."""
+    return name.lower()
+
+
 # ---------------------------------------------------------------------------
 # Image resolution
 # ---------------------------------------------------------------------------
@@ -46,7 +54,8 @@ def resolve_image(agent_image: str) -> str:
     """Resolve a step's agentImage to a full container image reference.
 
     If the image already contains '/' (e.g. a full registry path), use as-is.
-    Otherwise prepend the AGENT_IMAGE_REGISTRY env var.
+    Otherwise prepend the AGENT_IMAGE_REGISTRY env var + 'step-' prefix.
+    Short name "echo" → "{registry}/step-echo:latest"
     """
     if "/" in agent_image:
         return agent_image
@@ -56,7 +65,7 @@ def resolve_image(agent_image: str) -> str:
             f"Cannot resolve short image name '{agent_image}': "
             "AGENT_IMAGE_REGISTRY env var is not set"
         )
-    return f"{registry}/{agent_image}"
+    return f"{registry}/step-{agent_image}:latest"
 
 
 # ---------------------------------------------------------------------------
@@ -72,39 +81,6 @@ class JobResult:
 
 
 # ---------------------------------------------------------------------------
-# PVC helpers
-# ---------------------------------------------------------------------------
-
-
-def create_run_pvc(run_id: str, size_gi: str = "1Gi") -> str:
-    """Create a PersistentVolumeClaim for a playbook run's shared storage.
-
-    Returns the PVC name.
-    """
-    _init_clients()
-    pvc_name = f"run-{run_id}"
-
-    pvc = client.V1PersistentVolumeClaim(
-        metadata=client.V1ObjectMeta(
-            name=pvc_name,
-            namespace=_namespace(),
-            labels={"app": "skillmatic", "run-id": run_id},
-        ),
-        spec=client.V1PersistentVolumeClaimSpec(
-            access_modes=["ReadWriteOnce"],
-            resources=client.V1ResourceRequirements(
-                requests={"storage": size_gi},
-            ),
-        ),
-    )
-
-    _api_core.create_namespaced_persistent_volume_claim(
-        namespace=_namespace(), body=pvc,
-    )
-    return pvc_name
-
-
-# ---------------------------------------------------------------------------
 # Job helpers
 # ---------------------------------------------------------------------------
 
@@ -114,7 +90,6 @@ def create_step_job(
     step_id: str,
     image: str,
     org_id: str,
-    pvc_name: str,
     *,
     timeout_minutes: int = 30,
     env_extras: dict[str, str] | None = None,
@@ -125,7 +100,7 @@ def create_step_job(
     Returns the Job name.
     """
     _init_clients()
-    job_name = f"step-{run_id}-{step_id}"[:63]  # K8s name limit
+    job_name = f"step-{_k8s_name(run_id)}-{_k8s_name(step_id)}"[:63]
 
     env_vars = [
         client.V1EnvVar(name="RUN_ID", value=run_id),
@@ -138,8 +113,8 @@ def create_step_job(
 
     labels = {
         "app": "skillmatic",
-        "run-id": run_id,
-        "step-id": step_id,
+        "run-id": _k8s_name(run_id),
+        "step-id": _k8s_name(step_id),
         "component": "step-agent",
     }
 
@@ -147,8 +122,12 @@ def create_step_job(
         name="step-agent",
         image=image,
         env=env_vars,
+        resources=client.V1ResourceRequirements(
+            requests={"cpu": "250m", "memory": "512Mi"},
+            limits={"cpu": "1", "memory": "1Gi"},
+        ),
         volume_mounts=[
-            client.V1VolumeMount(name="shared", mount_path="/shared"),
+            client.V1VolumeMount(name="scratch", mount_path="/shared"),
         ],
     )
 
@@ -158,10 +137,8 @@ def create_step_job(
         containers=[container],
         volumes=[
             client.V1Volume(
-                name="shared",
-                persistent_volume_claim=client.V1PersistentVolumeClaimVolumeSource(
-                    claim_name=pvc_name,
-                ),
+                name="scratch",
+                empty_dir=client.V1EmptyDirVolumeSource(),
             ),
         ],
     )
@@ -175,6 +152,7 @@ def create_step_job(
         spec=client.V1JobSpec(
             backoff_limit=0,
             active_deadline_seconds=timeout_minutes * 60,
+            ttl_seconds_after_finished=300,
             template=client.V1PodTemplateSpec(
                 metadata=client.V1ObjectMeta(labels=labels),
                 spec=pod_spec,
@@ -263,9 +241,14 @@ def delete_job(job_name: str) -> None:
             raise
 
 
-def delete_pvc(pvc_name: str) -> None:
-    """Delete a PVC."""
+def delete_configmap(name: str) -> None:
+    """Delete a ConfigMap (best-effort)."""
     _init_clients()
-    _api_core.delete_namespaced_persistent_volume_claim(
-        name=pvc_name, namespace=_namespace(),
-    )
+    try:
+        _api_core.delete_namespaced_config_map(
+            name=name,
+            namespace=_namespace(),
+        )
+    except client.ApiException as exc:
+        if exc.status != 404:
+            raise

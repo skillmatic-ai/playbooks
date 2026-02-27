@@ -201,7 +201,7 @@ def _phase_after_approval(
     print(f"[step-agent] Wrote report to {report_path}")
 
     # Clean up checkpoint
-    clear_checkpoint(step_id)
+    clear_checkpoint(org_id, run_id, step_id)
 
     # Mark step as completed
     write_event(
@@ -241,8 +241,8 @@ def main() -> None:
             # Fresh start
             _phase_fresh(org_id, run_id, step_id)
         else:
-            # Resume from checkpoint
-            checkpoint = load_checkpoint(step_id)
+            # Resume from checkpoint (stored in Firestore on the step doc)
+            checkpoint = load_checkpoint(org_id, run_id, step_id)
             if checkpoint is None:
                 raise RuntimeError(
                     f"RESUME_THREAD_ID set but no checkpoint found for step {step_id}"
@@ -286,7 +286,7 @@ def main() -> None:
     except RunAbortedError:
         print("[step-agent] Run was aborted")
         update_step_status(org_id, run_id, step_id, "skipped")
-        clear_checkpoint(step_id)
+        clear_checkpoint(org_id, run_id, step_id)
         sys.exit(0)
 
     except Exception as exc:
@@ -307,7 +307,7 @@ def main() -> None:
             print("[step-agent] Failed to write error status to Firestore")
             traceback.print_exc()
 
-        clear_checkpoint(step_id)
+        clear_checkpoint(org_id, run_id, step_id)
         sys.exit(1)
 
 

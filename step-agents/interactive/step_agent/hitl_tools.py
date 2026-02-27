@@ -82,8 +82,8 @@ def ask_user(
     )
     print(f"[hitl] Asked question: {question} (id={question_id})")
 
-    # Save checkpoint
-    save_checkpoint(step_id, {
+    # Save checkpoint to Firestore (on the step document)
+    save_checkpoint(org_id, run_id, step_id, {
         "phase": "waiting_for_answer",
         "questionId": question_id,
         "data": checkpoint_data or {},
@@ -140,8 +140,8 @@ def request_approval(
     )
     print(f"[hitl] Requested approval: {description} (id={approval_id})")
 
-    # Save checkpoint
-    save_checkpoint(step_id, {
+    # Save checkpoint to Firestore (on the step document)
+    save_checkpoint(org_id, run_id, step_id, {
         "phase": "waiting_for_approval",
         "questionId": approval_id,
         "data": checkpoint_data or {},

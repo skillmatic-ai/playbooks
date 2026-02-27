@@ -1,8 +1,8 @@
 ---
 id: "e2e-test"
 name: "E2E Pipeline Test"
-version: "1.0.0"
-description: "End-to-end test playbook that exercises the echo agent (non-interactive) and the interactive agent (HITL checkpoint/resume)."
+version: "2.0.0"
+description: "End-to-end test playbook that exercises DAG parallel scheduling, echo agents, and interactive HITL checkpoint/resume."
 category: "testing"
 schemaVersion: "v2"
 
@@ -21,39 +21,60 @@ variables:
     description: "Optional project name passed at launch"
 
 steps:
-  - id: echo-step
+  - id: echo-alpha
     order: 1
-    title: "Echo Context"
+    title: "Echo Alpha"
     assignedRole: tester
     agentImage: echo
     timeoutMinutes: 10
     interactive: false
     approval: approve_only
+    dependencies: []
+
+  - id: echo-beta
+    order: 2
+    title: "Echo Beta"
+    assignedRole: tester
+    agentImage: echo
+    timeoutMinutes: 10
+    interactive: false
+    approval: approve_only
+    dependencies: []
 
   - id: interactive-step
-    order: 2
+    order: 3
     title: "Interactive Summary"
     assignedRole: tester
     agentImage: interactive
     timeoutMinutes: 30
     interactive: true
     approval: approve_only
+    dependencies: [echo-alpha, echo-beta]
 ---
 
 # E2E Pipeline Test Playbook
 
-This playbook validates the full Skillmatic agentic pipeline.
+This playbook validates the full Skillmatic agentic pipeline including
+DAG-aware parallel step scheduling.
 
-## Step: echo-step
+## Step: echo-alpha
 
-The echo agent loads its skill, reads the hydrated run context, and writes
-a report to `/shared/results/echo-step/report.md`. This step completes
-without any human interaction — it tests the basic orchestrator → step
-agent → Firestore lifecycle.
+The first echo agent runs in parallel with echo-beta (no dependencies).
+Loads its skill, reads the hydrated run context, and writes a report to
+`/shared/results/echo-alpha/report.md`. Tests the basic orchestrator →
+step agent → Firestore lifecycle.
+
+## Step: echo-beta
+
+The second echo agent runs in parallel with echo-alpha (no dependencies).
+Same behavior — loads skill, reads context, writes report. Together with
+echo-alpha, validates that the orchestrator launches independent steps
+concurrently.
 
 ## Step: interactive-step
 
-The interactive agent demonstrates the checkpoint/resume HITL flow:
+Depends on both echo-alpha and echo-beta. Only starts after both complete.
+Demonstrates the checkpoint/resume HITL flow:
 
 1. **Phase 1** — Asks the user a free-text question, then checkpoints and
    the pod terminates.
@@ -63,5 +84,5 @@ The interactive agent demonstrates the checkpoint/resume HITL flow:
 3. **Phase 3** — On resume, reads the approval decision and writes the
    final report.
 
-This step tests `onInputReceived`, resume K8s Jobs, and multi-phase
-checkpoint/resume.
+This step tests `onInputReceived`, resume K8s Jobs, multi-phase
+checkpoint/resume, and DAG dependency gating.

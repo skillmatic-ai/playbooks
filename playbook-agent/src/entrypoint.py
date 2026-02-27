@@ -15,6 +15,8 @@ from src.firestore_client import (
     _get_db,
 )
 from src.hydration import hydrate_playbook
+from src.k8s_client import delete_configmap
+from src.dag_scheduler import CyclicDependencyError
 from src.orchestrator import StepFailedError, run_orchestration
 from src.playbook_parser import parse_playbook_file
 
@@ -74,9 +76,8 @@ def main() -> None:
 
         # ---- Orchestrate steps ----
         namespace = os.environ.get("NAMESPACE", "skillmatic")
-        pvc_name = os.environ.get("PVC_NAME", f"run-{run_id}")
 
-        run_orchestration(playbook, org_id, run_id, namespace, pvc_name)
+        run_orchestration(playbook, org_id, run_id, namespace)
 
         # ---- Mark run as completed ----
         step_count = len(playbook.steps)
@@ -87,7 +88,28 @@ def main() -> None:
         )
         update_run_status(org_id, run_id, "completed", summary=summary)
         print(f"[playbook-agent] Run completed: {summary}")
+
+        # Clean up ConfigMap (best-effort — Jobs auto-clean via TTL)
+        _cleanup_configmap(run_id)
         sys.exit(0)
+
+    except CyclicDependencyError as exc:
+        print(f"[playbook-agent] FATAL: {exc}")
+        try:
+            write_event(
+                org_id, run_id, "playbook_failed",
+                payload={"error": str(exc)},
+            )
+            update_run_status(
+                org_id, run_id, "failed",
+                error={"code": "CYCLIC_DEPENDENCY", "message": str(exc)},
+            )
+        except Exception:
+            print("[playbook-agent] Failed to write error status to Firestore")
+            traceback.print_exc()
+
+        _cleanup_configmap(run_id)
+        sys.exit(1)
 
     except Exception as exc:
         print(f"[playbook-agent] FATAL: {exc}")
@@ -106,7 +128,18 @@ def main() -> None:
             print("[playbook-agent] Failed to write error status to Firestore")
             traceback.print_exc()
 
+        _cleanup_configmap(run_id)
         sys.exit(1)
+
+
+def _cleanup_configmap(run_id: str) -> None:
+    """Delete the playbook ConfigMap (best-effort)."""
+    try:
+        cm_name = f"playbook-{run_id.lower()}"
+        delete_configmap(cm_name)
+        print(f"[playbook-agent] Deleted ConfigMap {cm_name}")
+    except Exception:
+        print("[playbook-agent] ConfigMap cleanup failed (non-fatal)")
 
 
 if __name__ == "__main__":

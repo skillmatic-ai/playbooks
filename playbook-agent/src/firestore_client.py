@@ -169,6 +169,7 @@ def initialize_step_docs(org_id: str, run_id: str, steps: list) -> None:
             "order": step.order,
             "agentImage": step.agent_image,
             "timeoutMinutes": step.timeout_minutes,
+            "dependencies": step.dependencies,
             "createdAt": firestore.SERVER_TIMESTAMP,
         })
 
