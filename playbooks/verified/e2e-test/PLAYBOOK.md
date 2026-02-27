@@ -1,4 +1,5 @@
 ---
+id: "e2e-test"
 name: "E2E Pipeline Test"
 version: "1.0.0"
 description: "End-to-end test playbook that exercises the echo agent (non-interactive) and the interactive agent (HITL checkpoint/resume)."
@@ -6,7 +7,8 @@ category: "testing"
 schemaVersion: "v2"
 
 trigger:
-  type: manual
+  type: human_initiation
+  role: tester
 
 participants:
   - role: tester
