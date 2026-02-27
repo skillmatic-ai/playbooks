@@ -9,7 +9,7 @@ import traceback
 
 from step_agent.firestore_client import update_step_status, write_event, read_run_context
 from step_agent.skill_loader import load_skill
-from step_agent.file_tools import write_report
+from step_agent.storage_tools import write_report
 
 
 def main() -> None:
@@ -116,18 +116,18 @@ def main() -> None:
             payload={"message": "Report built, writing to shared storage", "percent": 75},
         )
 
-        # ---- Write report ----
-        report_path = write_report(step_id, report_content)
+        # ---- Write report (local + Firebase Storage) ----
+        result = write_report(org_id, run_id, step_id, report_content)
         write_event(
             org_id, run_id, "agent_tool_use",
             step_id=step_id,
             payload={
                 "toolName": "write_report",
                 "args": {"stepId": step_id},
-                "result": f"Report written to {report_path} ({len(report_content)} chars)",
+                "result": f"Report uploaded to {result['storagePath']} ({len(report_content)} chars)",
             },
         )
-        print(f"[step-agent] Wrote report to {report_path}")
+        print(f"[step-agent] Wrote report: {result['storagePath']}")
 
         # ---- Mark step as completed ----
         summary = f"Echo skill completed. {len(context)} context variables echoed."

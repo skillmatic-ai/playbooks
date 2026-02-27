@@ -28,7 +28,7 @@ from step_agent.hitl_tools import (
     request_approval,
 )
 from step_agent.skill_loader import load_skill
-from step_agent.file_tools import write_report
+from step_agent.storage_tools import write_report
 
 
 # ---------------------------------------------------------------------------
@@ -197,8 +197,8 @@ def _phase_after_approval(
         report_content = draft + "\n---\n\n_Rejected by user._\n"
         summary = "Draft rejected by user."
 
-    report_path = write_report(step_id, report_content)
-    print(f"[step-agent] Wrote report to {report_path}")
+    result = write_report(org_id, run_id, step_id, report_content)
+    print(f"[step-agent] Wrote report: {result['storagePath']}")
 
     # Clean up checkpoint
     clear_checkpoint(org_id, run_id, step_id)
