@@ -78,6 +78,17 @@ def validate_frontmatter(frontmatter: dict, filepath: Path) -> list[str]:
                 if req not in step:
                     errors.append(f"{filepath}: step {i} missing required field '{req}'")
 
+    # Validate trigger inputs (if present)
+    trigger = frontmatter.get("trigger", {})
+    if isinstance(trigger, dict) and "inputs" in trigger:
+        inputs = trigger["inputs"]
+        if not isinstance(inputs, list):
+            errors.append(f"{filepath}: trigger.inputs must be a list")
+        else:
+            for i, inp in enumerate(inputs):
+                if not isinstance(inp, dict) or "name" not in inp:
+                    errors.append(f"{filepath}: trigger.inputs[{i}] must have a 'name' field")
+
     return errors
 
 

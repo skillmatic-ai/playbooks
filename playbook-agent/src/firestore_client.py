@@ -64,6 +64,14 @@ def update_run_status(
         .collection("playbook_runs").document(run_id).update(data)
 
 
+def update_run_heartbeat(org_id: str, run_id: str) -> None:
+    """Update the lastHeartbeat timestamp (called every poll cycle by orchestrator)."""
+    db = _get_db()
+    db.collection("orgs").document(org_id) \
+        .collection("playbook_runs").document(run_id) \
+        .update({"lastHeartbeat": firestore.SERVER_TIMESTAMP})
+
+
 # ---------------------------------------------------------------------------
 # Step document helpers
 # ---------------------------------------------------------------------------

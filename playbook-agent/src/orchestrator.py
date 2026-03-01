@@ -31,7 +31,9 @@ from src.dag_scheduler import (
 )
 from src.firestore_client import (
     initialize_step_docs,
+    read_run,
     read_step_status,
+    update_run_heartbeat,
     update_run_status,
     update_step_status,
     write_event,
@@ -49,6 +51,10 @@ class StepFailedError(Exception):
     def __init__(self, step_id: str, message: str) -> None:
         self.step_id = step_id
         super().__init__(f"Step {step_id} failed: {message}")
+
+
+class RunAbortedError(Exception):
+    """Raised when the run is aborted by a user during orchestration."""
 
 
 # ---------------------------------------------------------------------------
@@ -404,8 +410,19 @@ def run_orchestration(
                 elif result == "skipped":
                     skipped.add(step_id)
 
-        # 4. Sleep before next poll iteration
+        # 4. Check for abort
+        run_data = read_run(org_id, run_id)
+        if run_data and run_data.get("status") == "aborted":
+            print("[orchestrator] Run aborted by user — exiting gracefully")
+            for sid in list(running):
+                update_step_status(org_id, run_id, sid, "skipped")
+                skipped.add(sid)
+            running.clear()
+            raise RunAbortedError("Run aborted by user")
+
+        # 5. Sleep + heartbeat
         time.sleep(DEFAULT_POLL_INTERVAL)
+        update_run_heartbeat(org_id, run_id)
 
     # --- Final summary ---
     _write_summary(steps, completed, failed, skipped)

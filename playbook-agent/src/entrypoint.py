@@ -17,7 +17,7 @@ from src.firestore_client import (
 from src.hydration import hydrate_playbook
 from src.k8s_client import delete_configmap
 from src.dag_scheduler import CyclicDependencyError
-from src.orchestrator import StepFailedError, run_orchestration
+from src.orchestrator import RunAbortedError, StepFailedError, run_orchestration
 from src.playbook_parser import parse_playbook_file
 
 from firebase_admin import firestore as fs
@@ -90,6 +90,13 @@ def main() -> None:
         print(f"[playbook-agent] Run completed: {summary}")
 
         # Clean up ConfigMap (best-effort — Jobs auto-clean via TTL)
+        _cleanup_configmap(run_id)
+        sys.exit(0)
+
+    except RunAbortedError:
+        # Run was aborted by user — status already set to "aborted" by Firebase Function.
+        # Just clean up and exit cleanly.
+        print("[playbook-agent] Run aborted — cleaning up and exiting")
         _cleanup_configmap(run_id)
         sys.exit(0)
 
