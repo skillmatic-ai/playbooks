@@ -54,8 +54,9 @@ def resolve_image(agent_image: str) -> str:
     """Resolve a step's agentImage to a full container image reference.
 
     If the image already contains '/' (e.g. a full registry path), use as-is.
-    Otherwise prepend the AGENT_IMAGE_REGISTRY env var + 'step-' prefix.
+    Otherwise prepend the AGENT_IMAGE_REGISTRY env var.
     Short name "echo" → "{registry}/step-echo:latest"
+    API agent "api-agent-notion" → "{registry}/api-agent-notion:latest"
     """
     if "/" in agent_image:
         return agent_image
@@ -65,6 +66,9 @@ def resolve_image(agent_image: str) -> str:
             f"Cannot resolve short image name '{agent_image}': "
             "AGENT_IMAGE_REGISTRY env var is not set"
         )
+    # API agent images already have the correct prefix from parser derivation
+    if agent_image.startswith("api-agent-"):
+        return f"{registry}/{agent_image}:latest"
     return f"{registry}/step-{agent_image}:latest"
 
 

@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import os
 import time
+import uuid
 
 from src.dag_scheduler import (
     get_ready_steps,
@@ -30,13 +31,21 @@ from src.dag_scheduler import (
     validate_dag,
 )
 from src.firestore_client import (
+    check_token_exists,
+    fetch_role_members,
     initialize_step_docs,
     read_run,
+    read_step_input_response,
+    read_step_input_values,
+    read_step_report,
     read_step_status,
     update_run_heartbeat,
     update_run_status,
     update_step_status,
     write_event,
+    write_prior_reports,
+    write_step_input_request_id,
+    write_step_input_values,
 )
 from src.k8s_client import create_step_job, resolve_image
 from src.playbook_parser import PlaybookDefinition, StepDef
@@ -62,7 +71,7 @@ class RunAbortedError(Exception):
 # ---------------------------------------------------------------------------
 
 
-def _read_step_report(step_id: str) -> str | None:
+def _read_step_report_local(step_id: str) -> str | None:
     """Read a step's completion report from the shared volume (best-effort)."""
     path = os.path.join(SHARED_ROOT, "results", step_id, "report.md")
     try:
@@ -70,6 +79,171 @@ def _read_step_report(step_id: str) -> str | None:
             return f.read()
     except FileNotFoundError:
         return None
+
+
+def _collect_prior_reports(
+    step: StepDef,
+    step_map: dict[str, StepDef],
+    org_id: str,
+    run_id: str,
+) -> str:
+    """Collect reports from all dependency steps and format as context string.
+
+    Returns a formatted string of all prior reports, or empty string if none.
+    """
+    if not step.dependencies:
+        return ""
+
+    sections: list[str] = []
+    for dep_id in step.dependencies:
+        dep = step_map.get(dep_id)
+        dep_title = dep.title if dep else dep_id
+        report = read_step_report(org_id, run_id, dep_id) or _read_step_report_local(dep_id)
+        if report:
+            sections.append(
+                f'=== Report from "{dep_title}" (completed) ===\n{report}'
+            )
+
+    return "\n\n".join(sections)
+
+
+# ---------------------------------------------------------------------------
+# OAuth token check (Issue 24)
+# ---------------------------------------------------------------------------
+
+
+def _check_oauth_and_launch(
+    step: StepDef,
+    org_id: str,
+    run_id: str,
+    namespace: str,
+    oauth_notified: set[str],
+    input_notified: set[str],
+    step_map: dict[str, StepDef],
+) -> str:
+    """Check OAuth token and step inputs before launching.
+
+    Returns:
+        'launched'       — step was launched successfully
+        'waiting_oauth'  — waiting for user to connect OAuth
+        'waiting_input'  — OAuth ok, but waiting for JIT step inputs
+    """
+    # Collect prior reports for dependency injection
+    prior_reports = _collect_prior_reports(step, step_map, org_id, run_id)
+
+    if not step.api:
+        # No API required — check step inputs then launch
+        if not _check_step_inputs(step, org_id, run_id, input_notified):
+            return "waiting_input"
+        _launch_step(step, org_id, run_id, namespace, prior_reports=prior_reports)
+        return "launched"
+
+    # Resolve role → user
+    role = step.assigned_role
+    members = fetch_role_members(org_id, role) if role else []
+
+    if not members:
+        print(f"[orchestrator] No member with role '{role}' — launching anyway")
+        if not _check_step_inputs(step, org_id, run_id, input_notified):
+            return "waiting_input"
+        _launch_step(step, org_id, run_id, namespace, prior_reports=prior_reports)
+        return "launched"
+
+    # Use first matching member
+    target_uid = members[0].get("uid", "")
+    target_name = members[0].get("displayName", members[0].get("email", "User"))
+
+    if not target_uid:
+        print(f"[orchestrator] Member has no uid — launching anyway")
+        if not _check_step_inputs(step, org_id, run_id, input_notified):
+            return "waiting_input"
+        _launch_step(step, org_id, run_id, namespace, prior_reports=prior_reports)
+        return "launched"
+
+    # Check if token exists
+    has_token = check_token_exists(org_id, target_uid, step.api)
+
+    if has_token:
+        print(f"[orchestrator] OAuth token found for {target_name} / {step.api}")
+        # OAuth ok — now check step inputs before launching
+        if not _check_step_inputs(step, org_id, run_id, input_notified):
+            return "waiting_input"
+        _launch_step(step, org_id, run_id, namespace, prior_reports=prior_reports)
+        return "launched"
+
+    # Token missing — emit event and pause
+    if step.id not in oauth_notified:
+        oauth_notified.add(step.id)
+        write_event(
+            org_id, run_id, "oauth_required",
+            step_id=step.id,
+            payload={
+                "service": step.api,
+                "targetUserId": target_uid,
+                "targetUserName": target_name,
+                "targetRole": role,
+                "scopes": step.required_connections,
+                "message": f"{target_name} needs to connect {step.api.title()}",
+            },
+        )
+        update_step_status(org_id, run_id, step.id, "waiting_for_oauth")
+        print(f"[orchestrator] Step {step.id} -> waiting_for_oauth ({target_name} / {step.api})")
+
+    return "waiting_oauth"
+
+
+# ---------------------------------------------------------------------------
+# JIT step input check
+# ---------------------------------------------------------------------------
+
+
+def _check_step_inputs(
+    step: StepDef,
+    org_id: str,
+    run_id: str,
+    input_notified: set[str],
+) -> bool:
+    """Check if a step requires JIT inputs before launching.
+
+    Returns True if no inputs needed or inputs already provided.
+    Returns False if the step is waiting for user input.
+    """
+    if not step.inputs:
+        return True  # No step-level inputs declared
+
+    # Check if response already exists (idempotent re-check)
+    existing = read_step_input_response(org_id, run_id, step.id)
+    if existing:
+        return True
+
+    if step.id not in input_notified:
+        input_notified.add(step.id)
+        request_id = str(uuid.uuid4())
+        write_event(
+            org_id, run_id, "step_input_request",
+            step_id=step.id,
+            payload={
+                "stepInputRequestId": request_id,
+                "targetRole": step.assigned_role,
+                "stepTitle": step.title,
+                "service": step.api,
+                "inputs": [
+                    {
+                        "name": inp.name,
+                        "type": inp.type,
+                        "label": inp.label or inp.name,
+                        "placeholder": inp.placeholder,
+                        "required": inp.required,
+                    }
+                    for inp in step.inputs
+                ],
+            },
+        )
+        update_step_status(org_id, run_id, step.id, "waiting_for_input")
+        write_step_input_request_id(org_id, run_id, step.id, request_id)
+        print(f"[orchestrator] Step {step.id} -> waiting_for_input ({len(step.inputs)} input(s) requested)")
+
+    return False
 
 
 # ---------------------------------------------------------------------------
@@ -82,16 +256,27 @@ def _launch_step(
     org_id: str,
     run_id: str,
     namespace: str,
+    *,
+    prior_reports: str = "",
 ) -> str:
     """Launch a step's K8s Job without blocking for completion.
 
     Updates Firestore status to 'running', writes a step_started event,
     resolves the container image, and creates the K8s Job.
+
+    If prior_reports is provided, writes it to the step doc so the agent
+    can read it via context_reader.
     Returns the job_name.
     """
     step_id = step.id
 
     update_step_status(org_id, run_id, step_id, "running")
+
+    # Write prior reports to step doc for the agent to consume
+    if prior_reports:
+        write_prior_reports(org_id, run_id, step_id, prior_reports)
+        print(f"[orchestrator] Injected {len(prior_reports)} chars of prior reports for {step_id}")
+
     write_event(
         org_id, run_id, "step_started",
         step_id=step_id,
@@ -156,6 +341,10 @@ def _poll_step_once(
         )
         print(f"[orchestrator] Step {step_id} resumed from pause")
 
+    # waiting_for_oauth → ready transition: token was granted, re-launch needed
+    if status == "ready":
+        return "ready"
+
     return None  # still in progress
 
 
@@ -174,12 +363,14 @@ def _handle_step_completion(
     step_id = step.id
 
     if final_status == "completed":
-        report = _read_step_report(step_id)
+        # Read report: prefer Firestore (written by API agent), fall back to local
+        report = read_step_report(org_id, run_id, step_id) or _read_step_report_local(step_id)
         summary = (
             f"Step completed. Report: {len(report)} chars"
             if report
             else "Step completed (no report)."
         )
+        has_report = report is not None and len(report) > 0
         update_step_status(
             org_id, run_id, step_id, "completed",
             result_summary=summary,
@@ -187,7 +378,11 @@ def _handle_step_completion(
         write_event(
             org_id, run_id, "step_completed",
             step_id=step_id,
-            payload={"stepId": step_id, "resultSummary": summary},
+            payload={
+                "stepId": step_id,
+                "resultSummary": summary,
+                "hasReport": has_report,
+            },
         )
         print(f"[orchestrator] Step {step_id} completed: {summary}")
 
@@ -315,13 +510,19 @@ def run_orchestration(
     failed: set[str] = set()
     running: set[str] = set()
     skipped: set[str] = set()
+    waiting_oauth: set[str] = set()  # Steps waiting for OAuth token grant
+    waiting_input: set[str] = set()  # Steps waiting for JIT step inputs
+    oauth_notified: set[str] = set()  # Steps that already emitted oauth_required
+    input_notified: set[str] = set()  # Steps that already emitted step_input_request
     paused_notified: dict[str, bool] = {}
     step_start_times: dict[str, float] = {}
 
     # --- Main DAG scheduling loop ---
     while True:
-        # 1. Launch newly ready steps
-        ready = get_ready_steps(steps, completed, failed | skipped, running)
+        # 1. Launch newly ready steps (exclude those waiting for OAuth or input)
+        ready = get_ready_steps(
+            steps, completed, failed | skipped, running | waiting_oauth | waiting_input,
+        )
 
         if ready:
             if len(ready) > 1:
@@ -340,12 +541,56 @@ def run_orchestration(
                     },
                 )
                 update_run_status(org_id, run_id, "running", current_step_id=step.id)
-                _launch_step(step, org_id, run_id, namespace)
-                running.add(step.id)
-                step_start_times[step.id] = time.time()
 
-        # 2. Check termination: nothing running and nothing more can be launched
-        if not running:
+                result = _check_oauth_and_launch(
+                    step, org_id, run_id, namespace, oauth_notified, input_notified, step_map,
+                )
+                if result == "launched":
+                    running.add(step.id)
+                    step_start_times[step.id] = time.time()
+                elif result == "waiting_oauth":
+                    waiting_oauth.add(step.id)
+                elif result == "waiting_input":
+                    waiting_input.add(step.id)
+
+        # 1b. Re-check waiting_for_oauth steps (token may have been granted)
+        for step_id in list(waiting_oauth):
+            status = read_step_status(org_id, run_id, step_id)
+            if status == "ready":
+                # Token was granted — onOAuthGranted set status to "ready"
+                step = step_map[step_id]
+                waiting_oauth.discard(step_id)
+
+                # After OAuth clears, check if step needs JIT inputs
+                inputs_ok = _check_step_inputs(step, org_id, run_id, input_notified)
+                if not inputs_ok:
+                    waiting_input.add(step_id)
+                    print(f"[orchestrator] Step {step_id} OAuth granted — now waiting for inputs")
+                    continue
+
+                prior = _collect_prior_reports(step, step_map, org_id, run_id)
+                print(f"[orchestrator] Step {step_id} OAuth granted — launching")
+                _launch_step(step, org_id, run_id, namespace, prior_reports=prior)
+                running.add(step_id)
+                step_start_times[step_id] = time.time()
+
+        # 1c. Re-check waiting_for_input steps (user may have provided input)
+        for step_id in list(waiting_input):
+            response = read_step_input_response(org_id, run_id, step_id)
+            if response:
+                step = step_map[step_id]
+                waiting_input.discard(step_id)
+                # Write resolved values to step doc
+                values = (response.get("payload") or {}).get("values", {})
+                write_step_input_values(org_id, run_id, step_id, values)
+                prior = _collect_prior_reports(step, step_map, org_id, run_id)
+                print(f"[orchestrator] Step {step_id} inputs received — launching")
+                _launch_step(step, org_id, run_id, namespace, prior_reports=prior)
+                running.add(step_id)
+                step_start_times[step_id] = time.time()
+
+        # 2. Check termination: nothing running/waiting and nothing more can be launched
+        if not running and not waiting_oauth and not waiting_input:
             remaining = {s.id for s in steps} - completed - failed - skipped
             if not remaining:
                 break
@@ -394,6 +639,15 @@ def run_orchestration(
             result = _poll_step_once(org_id, run_id, step_id, paused_notified)
 
             if result is not None:
+                if result == "ready":
+                    # Step was re-set to ready (e.g. OAuth granted) — re-launch
+                    running.discard(step_id)
+                    prior = _collect_prior_reports(step, step_map, org_id, run_id)
+                    _launch_step(step, org_id, run_id, namespace, prior_reports=prior)
+                    running.add(step_id)
+                    step_start_times[step_id] = time.time()
+                    continue
+
                 running.discard(step_id)
                 _handle_step_completion(step, result, org_id, run_id)
 

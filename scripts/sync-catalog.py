@@ -77,6 +77,14 @@ def validate_frontmatter(frontmatter: dict, filepath: Path) -> list[str]:
             for req in ["id", "title", "assignedRole"]:
                 if req not in step:
                     errors.append(f"{filepath}: step {i} missing required field '{req}'")
+            # Validate step inputs (JIT inputs)
+            step_inputs = step.get("inputs", [])
+            if step_inputs and not isinstance(step_inputs, list):
+                errors.append(f"{filepath}: step {i}.inputs must be a list")
+            elif isinstance(step_inputs, list):
+                for j, inp in enumerate(step_inputs):
+                    if not isinstance(inp, dict) or "name" not in inp:
+                        errors.append(f"{filepath}: step {i}.inputs[{j}] must have a 'name' field")
 
     # Validate trigger inputs (if present)
     trigger = frontmatter.get("trigger", {})
@@ -104,25 +112,44 @@ def determine_track(filepath: Path) -> str:
 
 
 def extract_step_summary(steps: list[dict]) -> list[dict]:
-    """Extract lightweight step summary for catalog display."""
-    return [
-        {
+    """Extract lightweight step summary for catalog display.
+
+    Supports both v2 (agentImage) and v3 (api + skills) schemas.
+    """
+    summaries = []
+    for step in steps:
+        if not isinstance(step, dict):
+            continue
+        api = step.get("api", "")
+        agent_image = step.get("agentImage", "")
+        if not agent_image and api:
+            agent_image = f"api-agent-{api}"
+        summaries.append({
             "id": step.get("id", ""),
             "title": step.get("title", ""),
-            "agentImage": step.get("agentImage", ""),
+            "agentImage": agent_image,
             "assignedRole": step.get("assignedRole", ""),
-        }
-        for step in steps
-        if isinstance(step, dict)
-    ]
+            "api": api,
+            "skills": step.get("skills", []) or [],
+            "inputs": step.get("inputs", []) or [],
+        })
+    return summaries
 
 
 def collect_agent_images(steps: list[dict]) -> set[str]:
-    """Collect unique agentImage references from steps."""
+    """Collect unique agent image references from steps.
+
+    For v3 playbooks, derives image name from the api field.
+    """
     images = set()
     for step in steps:
-        if isinstance(step, dict) and step.get("agentImage"):
-            images.add(step["agentImage"])
+        if not isinstance(step, dict):
+            continue
+        image = step.get("agentImage", "")
+        if not image and step.get("api"):
+            image = f"api-agent-{step['api']}"
+        if image:
+            images.add(image)
     return images
 
 
@@ -152,6 +179,7 @@ def build_catalog_doc(
         "name": frontmatter.get("name", ""),
         "description": frontmatter.get("description", ""),
         "version": frontmatter.get("version", ""),
+        "schemaVersion": frontmatter.get("schemaVersion", "v2"),
         "category": frontmatter.get("category", ""),
         "tags": tags,
         "track": track,

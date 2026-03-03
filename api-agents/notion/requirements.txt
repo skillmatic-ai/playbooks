@@ -1,0 +1,3 @@
+# Agent-specific dependencies
+# Base image provides: deepagents, httpx, firebase-admin, etc.
+notion-client>=2.2,<3

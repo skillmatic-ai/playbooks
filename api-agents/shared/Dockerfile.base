@@ -1,0 +1,41 @@
+# =============================================================================
+# API Agent Base Image
+# =============================================================================
+# Shared base for all API agents (Notion, Zendesk, GitHub, etc.).
+# Individual agents extend this via multi-stage build:
+#
+#   FROM api-agent-base AS base
+#   COPY api-agents/notion/ /agent/
+#   ...
+#
+# Contains: Python 3.12, Firebase Admin, Cloud KMS, shared libraries.
+# =============================================================================
+
+FROM python:3.12-slim AS api-agent-base
+
+# Prevent Python from buffering stdout/stderr (important for K8s logging)
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1
+
+WORKDIR /app
+
+# Install shared base dependencies
+COPY requirements-base.txt .
+RUN pip install --no-cache-dir -r requirements-base.txt
+
+# Copy shared library modules
+COPY token_reader.py    /shared-lib/token_reader.py
+COPY report_writer.py   /shared-lib/report_writer.py
+COPY context_reader.py  /shared-lib/context_reader.py
+COPY skill_fetcher.py   /shared-lib/skill_fetcher.py
+COPY firestore_client.py /shared-lib/firestore_client.py
+COPY checkpoint.py      /shared-lib/checkpoint.py
+COPY hitl_tools.py      /shared-lib/hitl_tools.py
+COPY skill_composer.py  /shared-lib/skill_composer.py
+COPY base_entrypoint.py /shared-lib/base_entrypoint.py
+
+# Add shared-lib to Python path
+ENV PYTHONPATH="/shared-lib:${PYTHONPATH}"
+
+# Default entrypoint — individual agents override CMD
+ENTRYPOINT ["python", "-m", "base_entrypoint"]

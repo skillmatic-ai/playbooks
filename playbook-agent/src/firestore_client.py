@@ -121,6 +121,103 @@ def read_step_status(org_id: str, run_id: str, step_id: str) -> str | None:
     return (doc.to_dict() or {}).get("status")
 
 
+def read_step_doc(org_id: str, run_id: str, step_id: str) -> dict | None:
+    """Read the full step document from Firestore."""
+    db = _get_db()
+    doc = db.collection("orgs").document(org_id) \
+        .collection("playbook_runs").document(run_id) \
+        .collection("steps").document(step_id).get()
+    if not doc.exists:
+        return None
+    return doc.to_dict()
+
+
+def read_step_report(org_id: str, run_id: str, step_id: str) -> str | None:
+    """Read a completed step's report from Firestore."""
+    doc = read_step_doc(org_id, run_id, step_id)
+    if doc is None:
+        return None
+    return doc.get("report")
+
+
+def write_prior_reports(
+    org_id: str,
+    run_id: str,
+    step_id: str,
+    prior_reports: str,
+) -> None:
+    """Write aggregated prior reports to the step doc (read by context_reader)."""
+    db = _get_db()
+    db.collection("orgs").document(org_id) \
+        .collection("playbook_runs").document(run_id) \
+        .collection("steps").document(step_id) \
+        .update({"priorReports": prior_reports})
+
+
+# ---------------------------------------------------------------------------
+# Step input helpers (JIT resource selectors)
+# ---------------------------------------------------------------------------
+
+
+def write_step_input_request_id(
+    org_id: str,
+    run_id: str,
+    step_id: str,
+    request_id: str,
+) -> None:
+    """Store the stepInputRequestId on the step doc for matching."""
+    db = _get_db()
+    db.collection("orgs").document(org_id) \
+        .collection("playbook_runs").document(run_id) \
+        .collection("steps").document(step_id) \
+        .update({"stepInputRequestId": request_id})
+
+
+def read_step_input_response(
+    org_id: str,
+    run_id: str,
+    step_id: str,
+) -> dict | None:
+    """Read a step_input_response input doc for a given step."""
+    db = _get_db()
+    inputs_ref = (
+        db.collection("orgs").document(org_id)
+        .collection("playbook_runs").document(run_id)
+        .collection("inputs")
+    )
+    docs = list(
+        inputs_ref.where("stepId", "==", step_id)
+        .where("type", "==", "step_input_response")
+        .limit(1)
+        .stream()
+    )
+    return docs[0].to_dict() if docs else None
+
+
+def write_step_input_values(
+    org_id: str,
+    run_id: str,
+    step_id: str,
+    values: dict[str, str],
+) -> None:
+    """Write resolved step input values to the step doc."""
+    db = _get_db()
+    db.collection("orgs").document(org_id) \
+        .collection("playbook_runs").document(run_id) \
+        .collection("steps").document(step_id) \
+        .update({"stepInputValues": values})
+
+
+def read_step_input_values(
+    org_id: str,
+    run_id: str,
+    step_id: str,
+) -> dict[str, str]:
+    """Read step input values from the step doc."""
+    doc = read_step_doc(org_id, run_id, step_id)
+    return (doc or {}).get("stepInputValues", {})
+
+
 # ---------------------------------------------------------------------------
 # Event helpers (append-only log)
 # ---------------------------------------------------------------------------
@@ -254,7 +351,7 @@ def fetch_org_context(org_id: str) -> dict:
 
 
 def fetch_role_members(org_id: str, role: str) -> list[dict]:
-    """Fetch active org members with a given role."""
+    """Fetch active org members with a given role (includes uid = doc ID)."""
     db = _get_db()
     query = (
         db.collection("orgs").document(org_id).collection("members")
@@ -265,11 +362,21 @@ def fetch_role_members(org_id: str, role: str) -> list[dict]:
     for doc in query.stream():
         d = doc.to_dict()
         results.append({
+            "uid": doc.id,
             "email": d.get("email", ""),
             "displayName": d.get("displayName", d.get("name", "")),
             "role": d.get("role", ""),
         })
     return results
+
+
+def check_token_exists(org_id: str, uid: str, service: str) -> bool:
+    """Check if an OAuth token exists for a user + service (no decryption)."""
+    db = _get_db()
+    doc = db.collection("orgs").document(org_id) \
+        .collection("members").document(uid) \
+        .collection("tokens").document(service).get()
+    return doc.exists
 
 
 def fetch_trigger_inputs(org_id: str, run_id: str) -> dict:

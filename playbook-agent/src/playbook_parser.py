@@ -26,12 +26,24 @@ class VariableDef:
 
 
 @dataclass
+class StepInputDef:
+    name: str
+    type: str = "text"      # e.g. "github:repository", "slack:channel", "text"
+    label: str = ""
+    placeholder: str = ""
+    required: bool = True
+
+
+@dataclass
 class StepDef:
     id: str
     order: int
     title: str
     assigned_role: str
     agent_image: str = ""
+    api: str = ""
+    skills: list[str] = field(default_factory=list)
+    inputs: list[StepInputDef] = field(default_factory=list)
     timeout_minutes: int = 30
     interactive: bool = False
     approval: str = "approve_only"
@@ -115,12 +127,35 @@ def _parse_steps(raw: list | None) -> list[StepDef]:
     for i, s in enumerate(raw):
         if not isinstance(s, dict):
             continue
+        # Derive agentImage from api field if not set directly
+        raw_api = s.get("api", "")
+        raw_agent_image = s.get("agentImage", s.get("agent_image", ""))
+        if not raw_agent_image and raw_api:
+            raw_agent_image = f"api-agent-{raw_api}"
+
+        # Parse step-level inputs (JIT resource selectors)
+        raw_inputs = s.get("inputs", []) or []
+        step_inputs = [
+            StepInputDef(
+                name=inp.get("name", ""),
+                type=inp.get("type", "text"),
+                label=inp.get("label", ""),
+                placeholder=inp.get("placeholder", ""),
+                required=inp.get("required", True),
+            )
+            for inp in raw_inputs
+            if isinstance(inp, dict) and inp.get("name")
+        ]
+
         result.append(StepDef(
             id=s.get("id", f"step-{i + 1}"),
             order=s.get("order", i + 1),
             title=s.get("title", f"Step {i + 1}"),
             assigned_role=s.get("assignedRole", s.get("assigned_role", "")),
-            agent_image=s.get("agentImage", s.get("agent_image", "")),
+            agent_image=raw_agent_image,
+            api=raw_api,
+            skills=s.get("skills", []) or [],
+            inputs=step_inputs,
             timeout_minutes=int(s.get("timeoutMinutes", s.get("timeout_minutes", 30))),
             interactive=bool(s.get("interactive", False)),
             approval=s.get("approval", "approve_only"),

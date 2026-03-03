@@ -29,16 +29,6 @@ trigger:
       type: date
       label: "Start Date"
       required: true
-    - name: slack_channel
-      type: slack:channel
-      label: "Slack Channel"
-      placeholder: "Select a Slack channel..."
-      required: true
-    - name: jira_project
-      type: jira:project
-      label: "Jira Project"
-      placeholder: "Select a Jira project..."
-      required: true
 
 participants:
   - role: HR
@@ -73,14 +63,6 @@ variables:
     source: "run.context.start_date"
     required: true
     description: "Employee's start date (e.g. 2025-03-15)"
-  - name: slack_channel
-    source: "run.context.slack_channel"
-    required: true
-    description: "Slack channel for the welcome message (e.g. general, new-hires)"
-  - name: jira_project
-    source: "run.context.jira_project"
-    required: true
-    description: "Jira project key for the onboarding task (e.g. HR, ON)"
 
 steps:
   - id: welcome-email
@@ -98,6 +80,17 @@ steps:
     title: "Provision Accounts"
     assignedRole: IT
     agentImage: account-provisioner
+    inputs:
+      - name: slack_channel
+        type: slack:channel
+        label: "Select Slack Channel"
+        placeholder: "Select a Slack channel..."
+        required: true
+      - name: jira_project
+        type: jira:project
+        label: "Select Jira Project"
+        placeholder: "Select a Jira project..."
+        required: true
     timeoutMinutes: 30
     interactive: true
     approval: approve_only

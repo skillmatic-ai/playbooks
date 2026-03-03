@@ -1,0 +1,104 @@
+name: Build API Agent
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'api-agents/**'
+
+permissions:
+  contents: read
+  id-token: write
+
+env:
+  GCP_PROJECT_ID: skillmatic-ea1ab
+  GCP_PROJECT_NUMBER: '445950635493'
+  GAR_REGION: us-central1
+  GAR_REPOSITORY: skillmatic-agents
+
+jobs:
+  detect-changes:
+    runs-on: ubuntu-latest
+    outputs:
+      agents: ${{ steps.detect.outputs.agents }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+
+      - name: Detect changed API agents
+        id: detect
+        run: |
+          # Find api-agents/{name}/ directories that changed (exclude shared/)
+          if git rev-parse HEAD~1 >/dev/null 2>&1; then
+            CHANGED=$(git diff --name-only HEAD~1 HEAD -- api-agents/ \
+              | cut -d'/' -f2 \
+              | sort -u \
+              | grep -v '^shared$' \
+              | jq -R -s -c 'split("\n") | map(select(length > 0))')
+          else
+            # First commit — build all API agents (exclude shared/)
+            CHANGED=$(ls -d api-agents/*/ 2>/dev/null \
+              | xargs -I{} basename {} \
+              | grep -v '^shared$' \
+              | jq -R -s -c 'split("\n") | map(select(length > 0))')
+          fi
+
+          # If only shared/ changed, rebuild ALL api agents
+          SHARED_ONLY=$(git diff --name-only HEAD~1 HEAD -- api-agents/ \
+            | cut -d'/' -f2 | sort -u)
+          if [ "$SHARED_ONLY" = "shared" ]; then
+            CHANGED=$(ls -d api-agents/*/ 2>/dev/null \
+              | xargs -I{} basename {} \
+              | grep -v '^shared$' \
+              | jq -R -s -c 'split("\n") | map(select(length > 0))')
+          fi
+
+          echo "agents=$CHANGED" >> "$GITHUB_OUTPUT"
+          echo "Changed agents: $CHANGED"
+
+  build-and-push:
+    needs: detect-changes
+    if: needs.detect-changes.outputs.agents != '[]' && needs.detect-changes.outputs.agents != ''
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        agent: ${{ fromJson(needs.detect-changes.outputs.agents) }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Authenticate to Google Cloud
+        id: auth
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: 'projects/${{ env.GCP_PROJECT_NUMBER }}/locations/global/workloadIdentityPools/github-pool/providers/github-provider'
+          service_account: 'github-ci@${{ env.GCP_PROJECT_ID }}.iam.gserviceaccount.com'
+
+      - name: Configure Docker for Artifact Registry
+        run: gcloud auth configure-docker ${{ env.GAR_REGION }}-docker.pkg.dev --quiet
+
+      - name: Build Docker image (multi-stage: shared base + agent layer)
+        run: |
+          IMAGE="${{ env.GAR_REGION }}-docker.pkg.dev/${{ env.GCP_PROJECT_ID }}/${{ env.GAR_REPOSITORY }}/api-agent-${{ matrix.agent }}"
+
+          # Build the shared base first
+          docker build \
+            -f api-agents/shared/Dockerfile.base \
+            -t api-agent-base:latest \
+            ./api-agents/shared
+
+          # Build the agent-specific image (extends base)
+          docker build \
+            -t "${IMAGE}:${{ github.sha }}" \
+            -t "${IMAGE}:latest" \
+            --build-arg BASE_IMAGE=api-agent-base:latest \
+            ./api-agents/${{ matrix.agent }}
+
+      - name: Push Docker image
+        run: |
+          IMAGE="${{ env.GAR_REGION }}-docker.pkg.dev/${{ env.GCP_PROJECT_ID }}/${{ env.GAR_REPOSITORY }}/api-agent-${{ matrix.agent }}"
+          docker push "${IMAGE}:${{ github.sha }}"
+          docker push "${IMAGE}:latest"

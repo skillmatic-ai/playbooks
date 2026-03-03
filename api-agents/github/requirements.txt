@@ -1,0 +1,2 @@
+# Agent-specific dependencies
+# Base image provides: deepagents, httpx, firebase-admin, etc.
