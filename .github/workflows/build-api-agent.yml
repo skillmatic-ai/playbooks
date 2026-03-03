@@ -32,29 +32,29 @@ jobs:
       - name: Detect changed API agents
         id: detect
         run: |
-          # Find api-agents/{name}/ directories that changed (exclude shared/)
-          if git rev-parse HEAD~1 >/dev/null 2>&1; then
+          ALL_AGENTS=$(ls -d api-agents/*/ 2>/dev/null \
+            | xargs -I{} basename {} \
+            | grep -v '^shared$' \
+            | jq -R -s -c 'split("\n") | map(select(length > 0))')
+
+          # workflow_dispatch or missing HEAD~1 → build all agents
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            CHANGED="$ALL_AGENTS"
+          elif ! git rev-parse HEAD~1 >/dev/null 2>&1; then
+            CHANGED="$ALL_AGENTS"
+          else
             CHANGED=$(git diff --name-only HEAD~1 HEAD -- api-agents/ \
               | cut -d'/' -f2 \
               | sort -u \
               | grep -v '^shared$' \
               | jq -R -s -c 'split("\n") | map(select(length > 0))')
-          else
-            # First commit — build all API agents (exclude shared/)
-            CHANGED=$(ls -d api-agents/*/ 2>/dev/null \
-              | xargs -I{} basename {} \
-              | grep -v '^shared$' \
-              | jq -R -s -c 'split("\n") | map(select(length > 0))')
-          fi
 
-          # If only shared/ changed, rebuild ALL api agents
-          SHARED_ONLY=$(git diff --name-only HEAD~1 HEAD -- api-agents/ \
-            | cut -d'/' -f2 | sort -u)
-          if [ "$SHARED_ONLY" = "shared" ]; then
-            CHANGED=$(ls -d api-agents/*/ 2>/dev/null \
-              | xargs -I{} basename {} \
-              | grep -v '^shared$' \
-              | jq -R -s -c 'split("\n") | map(select(length > 0))')
+            # If only shared/ changed, rebuild ALL api agents
+            SHARED_ONLY=$(git diff --name-only HEAD~1 HEAD -- api-agents/ \
+              | cut -d'/' -f2 | sort -u)
+            if [ "$SHARED_ONLY" = "shared" ]; then
+              CHANGED="$ALL_AGENTS"
+            fi
           fi
 
           echo "agents=$CHANGED" >> "$GITHUB_OUTPUT"
