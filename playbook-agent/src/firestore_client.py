@@ -351,11 +351,11 @@ def fetch_org_context(org_id: str) -> dict:
 
 
 def fetch_role_members(org_id: str, role: str) -> list[dict]:
-    """Fetch active org members with a given role (includes uid = doc ID)."""
+    """Fetch active org members whose functions[] array contains the given role."""
     db = _get_db()
     query = (
         db.collection("orgs").document(org_id).collection("members")
-        .where("role", "==", role)
+        .where("functions", "array_contains", role)
         .where("status", "==", "active")
     )
     results = []
@@ -364,10 +364,16 @@ def fetch_role_members(org_id: str, role: str) -> list[dict]:
         results.append({
             "uid": doc.id,
             "email": d.get("email", ""),
-            "displayName": d.get("displayName", d.get("name", "")),
-            "role": d.get("role", ""),
+            "displayName": d.get("name", ""),
+            "role": role,
         })
     return results
+
+
+def read_role_assignments(org_id: str, run_id: str) -> dict[str, dict]:
+    """Read roleAssignments from the run document."""
+    run = read_run(org_id, run_id)
+    return (run or {}).get("roleAssignments", {})
 
 
 def check_token_exists(org_id: str, uid: str, service: str) -> bool:

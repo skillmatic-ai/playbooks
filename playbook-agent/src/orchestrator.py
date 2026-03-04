@@ -34,6 +34,7 @@ from src.firestore_client import (
     check_token_exists,
     fetch_role_members,
     initialize_step_docs,
+    read_role_assignments,
     read_run,
     read_step_input_response,
     read_step_input_values,
@@ -120,6 +121,7 @@ def _check_oauth_and_launch(
     oauth_notified: set[str],
     input_notified: set[str],
     step_map: dict[str, StepDef],
+    role_assignments: dict[str, dict] | None = None,
 ) -> str:
     """Check OAuth token and step inputs before launching.
 
@@ -138,20 +140,23 @@ def _check_oauth_and_launch(
         _launch_step(step, org_id, run_id, namespace, prior_reports=prior_reports)
         return "launched"
 
-    # Resolve role → user
+    # Resolve role → user (primary: roleAssignments, fallback: Firestore query)
     role = step.assigned_role
-    members = fetch_role_members(org_id, role) if role else []
+    assignment = (role_assignments or {}).get(role) if role else None
 
-    if not members:
-        print(f"[orchestrator] No member with role '{role}' — launching anyway")
-        if not _check_step_inputs(step, org_id, run_id, input_notified):
-            return "waiting_input"
-        _launch_step(step, org_id, run_id, namespace, prior_reports=prior_reports)
-        return "launched"
-
-    # Use first matching member
-    target_uid = members[0].get("uid", "")
-    target_name = members[0].get("displayName", members[0].get("email", "User"))
+    if assignment:
+        target_uid = assignment.get("memberId", "")
+        target_name = assignment.get("name", assignment.get("email", "User"))
+    else:
+        members = fetch_role_members(org_id, role) if role else []
+        if not members:
+            print(f"[orchestrator] No member with role '{role}' — launching anyway")
+            if not _check_step_inputs(step, org_id, run_id, input_notified):
+                return "waiting_input"
+            _launch_step(step, org_id, run_id, namespace, prior_reports=prior_reports)
+            return "launched"
+        target_uid = members[0].get("uid", "")
+        target_name = members[0].get("displayName", members[0].get("email", "User"))
 
     if not target_uid:
         print(f"[orchestrator] Member has no uid — launching anyway")
@@ -501,6 +506,13 @@ def run_orchestration(
     initialize_step_docs(org_id, run_id, steps)
     print(f"[orchestrator] Initialized {len(steps)} step docs")
 
+    # --- Load role assignments from run doc ---
+    role_assignments = read_role_assignments(org_id, run_id)
+    if role_assignments:
+        print(f"[orchestrator] Role assignments: {list(role_assignments.keys())}")
+    else:
+        print("[orchestrator] No role assignments on run doc — will use Firestore member lookup")
+
     # --- Build step lookup ---
     step_map: dict[str, StepDef] = {s.id: s for s in steps}
     total = len(steps)
@@ -544,6 +556,7 @@ def run_orchestration(
 
                 result = _check_oauth_and_launch(
                     step, org_id, run_id, namespace, oauth_notified, input_notified, step_map,
+                    role_assignments=role_assignments,
                 )
                 if result == "launched":
                     running.add(step.id)
